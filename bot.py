@@ -4,41 +4,100 @@ from openai import OpenAI
 import os
 import random
 import json
+import shutil
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 # =========================
-# TOKENS
+# TIMEZONE (India time)
 # =========================
+
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+# =========================
+# TOKENS (Railway Variables se aate hain)
+# =========================
+# Agar Railway mein tumhare variable ke naam alag hain,
+# to sirf quotes ke andar ka naam badlo.
 
 TELEGRAM_TOKEN = os.getenv("8782677436:AAFJQW3Kg9QURs_Wi3uyt-rZeTxQo8IXI2Q")
 OPENAI_API_KEY = os.getenv("AIzaSyCxT3xd-rG-I3OkJaGmwMQ0wdiFBQWA-2Q")
 
+if not TELEGRAM_TOKEN:
+    raise SystemExit("ERROR: TELEGRAM_TOKEN variable Railway mein set nahi hai.")
+if not OPENAI_API_KEY:
+    raise SystemExit("ERROR: OPENAI_API_KEY variable Railway mein set nahi hai.")
+
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+# =========================
+# FILE HELPERS (safe load / save)
+# =========================
+
+file_lock = threading.Lock()
+
+
+def load_json(path, default):
+    """File nahi hai to default. File kharab hai to backup bana kar default."""
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"WARNING: {path} read nahi ho payi: {e}")
+        try:
+            shutil.copy(path, path + ".broken")
+            print(f"Backup bana diya: {path}.broken")
+        except Exception as e2:
+            print(f"Backup nahi bana: {e2}")
+        return default
+
+
+def save_json(path, data):
+    with file_lock:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+
 
 # =========================
 # MEMORY SYSTEM
 # =========================
 
 MEMORY_FILE = "memory.json"
+USER_MODE_FILE = "user_mode.json"
 
-try:
-    with open(MEMORY_FILE, "r") as f:
-        memory = json.load(f)
-except:
-    memory = {}
+memory = load_json(MEMORY_FILE, {})
+
 
 def save_memory():
-    with open(MEMORY_FILE, "w") as f:
-        json.dump(memory, f)
+    try:
+        save_json(MEMORY_FILE, memory)
+    except Exception as e:
+        print(f"Memory save error: {e}")
+
 
 # =========================
 # USER MODES
 # =========================
 
-user_mode = {}
+user_mode = load_json(USER_MODE_FILE, {})
+
+
+def save_user_mode():
+    try:
+        save_json(USER_MODE_FILE, user_mode)
+    except Exception as e:
+        print(f"User mode save error: {e}")
+
 
 # =========================
 # NEET SUBJECTS
@@ -78,6 +137,7 @@ def start(message):
     chat_id = str(message.chat.id)
 
     user_mode[chat_id] = "waiting"
+    save_user_mode()
 
     keyboard = InlineKeyboardMarkup()
 
@@ -99,6 +159,12 @@ def start(message):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
 
+    # Button par loading spinner band karne ke liye
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+
     chat_id = str(call.message.chat.id)
 
     # =========================
@@ -108,6 +174,7 @@ def callback_handler(call):
     if call.data == "pragati_yes":
 
         user_mode[chat_id] = "pragati"
+        save_user_mode()
 
         bot.send_message(
             call.message.chat.id,
@@ -121,6 +188,7 @@ def callback_handler(call):
     elif call.data == "pragati_no":
 
         user_mode[chat_id] = "other"
+        save_user_mode()
 
         bot.send_message(
             call.message.chat.id,
@@ -134,6 +202,9 @@ def callback_handler(call):
     elif call.data.startswith("subject_"):
 
         subject = call.data.split("_")[1]
+
+        if subject not in neet_subjects:
+            return
 
         keyboard = InlineKeyboardMarkup()
 
@@ -163,7 +234,15 @@ def callback_handler(call):
         subject = data[1]
         chapter = data[2]
 
-        mcq = generate_neet_mcq(subject, chapter)
+        try:
+            mcq = generate_neet_mcq(subject, chapter)
+        except Exception as e:
+            print(f"MCQ error: {e}")
+            bot.send_message(
+                call.message.chat.id,
+                "Abhi quiz nahi ban paya 🥺 Thodi der baad try karo."
+            )
+            return
 
         bot.send_message(
             call.message.chat.id,
@@ -265,47 +344,71 @@ def quiz(message):
     )
 
 # =========================
-# AUTO GOOD MORNING
+# AUTO GOOD MORNING / NIGHT / BIRTHDAY
 # =========================
+# - Sirf "pragati" mode wale chats ko jaata hai
+# - Har message din mein sirf ek baar
+# - India time (IST) ke hisaab se
 
 def auto_messages():
 
+    last_sent = {}
+
     while True:
 
-        current_time = datetime.now().strftime("%H:%M")
+        try:
 
-        for chat_id in user_mode:
+            now = datetime.now(IST)
+            date_key = now.strftime("%Y-%m-%d")
+            today = now.strftime("%d-%m")
 
-            try:
+            for chat_id, mode in list(user_mode.items()):
 
-                if current_time == "07:00":
+                if mode != "pragati":
+                    continue
 
-                    bot.send_message(
-                        int(chat_id),
-                        "Good Morning Pragati ☀️❤️\nAaj bhi NEET phod denge 😏📚"
-                    )
+                try:
 
-                if current_time == "22:00":
+                    # Good Morning (7:00 - 7:09)
+                    if now.hour == 7 and now.minute < 10:
 
-                    bot.send_message(
-                        int(chat_id),
-                        "Good Night Pragati 🌙❤️\nJyada stress mat lo 🥺\nMain hoon na 💖"
-                    )
+                        if last_sent.get((chat_id, "morning")) != date_key:
 
-                # Birthday Message
-                today = datetime.now().strftime("%d-%m")
+                            bot.send_message(
+                                int(chat_id),
+                                "Good Morning Pragati ☀️❤️\nAaj bhi NEET phod denge 😏📚"
+                            )
+                            last_sent[(chat_id, "morning")] = date_key
 
-                if today == "22-09":
+                        # Birthday Message (sirf 22 September ko, ek baar)
+                        if today == "22-09":
 
-                    bot.send_message(
-                        int(chat_id),
-                        "Happy Birthday Pragatiii 🎂❤️\nTum meri favourite insan ho 🥺💖"
-                    )
+                            if last_sent.get((chat_id, "birthday")) != date_key:
 
-            except:
-                pass
+                                bot.send_message(
+                                    int(chat_id),
+                                    "Happy Birthday Pragatiii 🎂❤️\nTum meri favourite insan ho 🥺💖"
+                                )
+                                last_sent[(chat_id, "birthday")] = date_key
 
-        time.sleep(60)
+                    # Good Night (22:00 - 22:09)
+                    if now.hour == 22 and now.minute < 10:
+
+                        if last_sent.get((chat_id, "night")) != date_key:
+
+                            bot.send_message(
+                                int(chat_id),
+                                "Good Night Pragati 🌙❤️\nJyada stress mat lo 🥺\nMain hoon na 💖"
+                            )
+                            last_sent[(chat_id, "night")] = date_key
+
+                except Exception as e:
+                    print(f"Auto message error ({chat_id}): {e}")
+
+        except Exception as e:
+            print(f"Auto thread error: {e}")
+
+        time.sleep(30)
 
 # =========================
 # MAIN CHAT HANDLER
@@ -316,6 +419,9 @@ def all_messages(message):
 
     chat_id = str(message.chat.id)
     text = message.text
+
+    if not text:
+        return
 
     # Save memory
     if chat_id not in memory:
@@ -332,6 +438,7 @@ def all_messages(message):
     if chat_id not in user_mode:
 
         user_mode[chat_id] = "waiting"
+        save_user_mode()
 
         bot.reply_to(
             message,
@@ -406,21 +513,30 @@ def all_messages(message):
 
         except Exception as e:
 
+            # Asli error sirf Railway logs mein, user ko simple message
+            print(f"GPT error: {e}")
+
             bot.reply_to(
                 message,
-                f"Error: {e}"
+                "Abhi thodi problem aa rahi hai 🥺 Thodi der baad dobara try karo ❤️"
             )
 
 # =========================
 # START AUTO THREAD
 # =========================
 
-threading.Thread(target=auto_messages).start()
+threading.Thread(target=auto_messages, daemon=True).start()
 
 # =========================
 # RUN BOT
 # =========================
 
 print("Bot Running...")
+
+# Purana webhook ho to hata do (409 conflict se bachne ke liye)
+try:
+    bot.remove_webhook()
+except Exception as e:
+    print(f"Webhook remove warning: {e}")
 
 bot.infinity_polling()
